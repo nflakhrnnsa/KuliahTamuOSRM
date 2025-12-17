@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>OSRM 3D Route Planner</title>
+
+<link href="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.css" rel="stylesheet">
+<script src="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.js"></script>
+
+<style>
+body{margin:0;font-family:Segoe UI,Arial,sans-serif;}
+#sidebar{
+  position:absolute;left:0;top:0;width:360px;height:100%;
+  background:#fff;padding:16px;overflow:auto;z-index:2;
+  box-shadow:3px 0 12px rgba(0,0,0,.25);
+}
+#map{position:absolute;left:360px;right:0;top:0;bottom:0;}
+h2{margin-top:0;}
+.block{margin-bottom:14px;}
+button,input,select{
+  width:100%;padding:8px;margin-top:6px;
+  border-radius:4px;border:1px solid #ccc;
+}
+button{background:#2563eb;color:#fff;border:none;cursor:pointer;}
+button:hover{background:#1e40af;}
+.secondary{background:#6b7280;}
+.secondary:hover{background:#374151;}
+#search-results div{
+  padding:6px;cursor:pointer;border-bottom:1px solid #ddd;
+}
+#search-results div:hover{background:#e5e7eb;}
+table{border-collapse:collapse;width:100%;font-size:12px;}
+td{border:1px solid #ccc;padding:4px;text-align:center;}
+.toggle{
+  display:flex;align-items:center;gap:8px;margin-bottom:10px;
+}
+</style>
+</head>
+
+<body>
+
+<div id="sidebar">
+<h2>🌍 OSRM 3D Route Planner</h2>
+<p>
+Tambah waypoint via <b>klik peta</b>, <b>pencarian</b>, atau <b>lokasi saya</b>.
+</p>
+
+<div class="block">
+<label>Basemap</label>
+<select id="basemap">
+  <option value="satellite-streets-v12">Satellite Streets</option>
+  <option value="streets-v12">Streets</option>
+  <option value="light-v11">Light</option>
+  <option value="dark-v11">Dark</option>
+</select>
+</div>
+
+<div class="block">
+<label>Cari Lokasi</label>
+<input id="search" placeholder="UGM, Malioboro, dll">
+<div id="search-results"></div>
+</div>
+
+<div class="toggle">
+<input type="checkbox" id="toggle-3d" checked>
+<label for="toggle-3d">Tampilkan Bangunan 3D</label>
+</div>
+
+<div class="block">
+<button id="btn-location">📍 Lokasi Saya</button>
+<button id="btn-matrix">Compute OD Matrix</button>
+<button id="btn-trip">Optimize Trip (TSP)</button>
+<button id="btn-remove" class="secondary">Hapus Waypoint Terakhir</button>
+<button id="clear" class="secondary">Clear All</button>
+</div>
+
+<h3>Waypoints</h3>
+<ol id="stops"></ol>
+
+<h3>OD Matrix (menit)</h3>
+<div id="matrix"></div>
+</div>
+
+<div id="map"></div>
+
+<script>
+mapboxgl.accessToken =
+'pk.eyJ1IjoibmZsYWtocm5uc2EiLCJhIjoiY21nOTV5cjRnMGR6eDJqcTB6Ym5rdXhvaSJ9.JE7QI26o4gt8OuPneijhiA';
+
+let map, waypoints=[], markers=[];
+
+/* INIT MAP */
+function initMap(style){
+  if(map) map.remove();
+  map=new mapboxgl.Map({
+    container:'map',
+    style:`mapbox://styles/mapbox/${style}`,
+    center:[110.3695,-7.7956],
+    zoom:14,pitch:60,bearing:-15,antialias:true
+  });
+  map.addControl(new mapboxgl.NavigationControl());
+  map.on('load',()=>{add3D();});
+  map.on('click',e=>addWaypoint([e.lngLat.lng,e.lngLat.lat]));
+}
+initMap('satellite-streets-v12');
+
+/* 3D BUILDINGS */
+function add3D(){
+  const layers=map.getStyle().layers;
+  const labelLayerId=layers.find(l=>l.type==='symbol'&&l.layout['text-field']).id;
+  map.addLayer({
+    id:'3d-buildings',
+    source:'composite',
+    'source-layer':'building',
+    filter:['==','extrude','true'],
+    type:'fill-extrusion',
+    minzoom:15,
+    paint:{
+      'fill-extrusion-color':'#aaa',
+      'fill-extrusion-height':['get','height'],
+      'fill-extrusion-base':['get','min_height'],
+      'fill-extrusion-opacity':0.7
+    }
+  },labelLayerId);
+}
+
+/* TOGGLE 3D */
+document.getElementById('toggle-3d').onchange=function(){
+  if(!map.getLayer('3d-buildings'))return;
+  map.setLayoutProperty(
+    '3d-buildings','visibility',
+    this.checked?'visible':'none'
+  );
+};
+
+/* BASEMAP */
+document.getElementById('basemap').onchange=e=>initMap(e.target.value);
+
+/* WAYPOINT */
+function addWaypoint(coord){
+  waypoints.push(coord);
+  const m=new mapboxgl.Marker().setLngLat(coord).addTo(map);
+  markers.push(m);
+  updateStops();
+}
+function updateStops(){
+  const s=document.getElementById('stops'); s.innerHTML='';
+  waypoints.forEach(p=>{
+    const li=document.createElement('li');
+    li.textContent=`${p[1].toFixed(5)}, ${p[0].toFixed(5)}`;
+    s.appendChild(li);
+  });
+}
+
+/* LOCATION */
+document.getElementById('btn-location').onclick=()=>{
+  navigator.geolocation.getCurrentPosition(p=>{
+    const c=[p.coords.longitude,p.coords.latitude];
+    map.flyTo({center:c,zoom:16});
+    addWaypoint(c);
+  });
+};
+
+/* SEARCH */
+const search=document.getElementById('search'),res=document.getElementById('search-results');
+search.oninput=async()=>{
+  if(search.value.length<3){res.innerHTML='';return;}
+  const r=await fetch(`https://api.mapbox.com/geocoding/v5/mapbox.places/${search.value}.json?access_token=${mapboxgl.accessToken}&country=id`);
+  const d=await r.json(); res.innerHTML='';
+  d.features.forEach(f=>{
+    const div=document.createElement('div');
+    div.textContent=f.place_name;
+    div.onclick=()=>{map.flyTo({center:f.center,zoom:15});addWaypoint(f.center);res.innerHTML='';search.value='';};
+    res.appendChild(div);
+  });
+};
+
+/* OD MATRIX */
+document.getElementById('btn-matrix').onclick=async()=>{
+  if(waypoints.length<3){alert('Minimal 3 titik');return;}
+  const coords=waypoints.map(p=>p.join(',')).join(';');
+  const r=await fetch(`https://router.project-osrm.org/table/v1/driving/${coords}?annotations=duration`);
+  const d=await r.json();
+  let h='<table>';
+  d.durations.forEach(r=>{h+='<tr>';r.forEach(c=>h+=`<td>${(c/60).toFixed(1)}</td>`);h+='</tr>';});
+  h+='</table>';
+  document.getElementById('matrix').innerHTML=h;
+};
+
+/* TSP */
+document.getElementById('btn-trip').onclick=async()=>{
+  if(waypoints.length<3){alert('Minimal 3 titik');return;}
+  const coords=waypoints.map(p=>p.join(',')).join(';');
+  const r=await fetch(`https://router.project-osrm.org/trip/v1/driving/${coords}?overview=full&geometries=geojson`);
+  const d=await r.json();
+  drawRoute(d.trips[0].geometry);
+};
+function drawRoute(g){
+  if(map.getSource('route')){
+    map.getSource('route').setData({type:'Feature',geometry:g});
+  }else{
+    map.addSource('route',{type:'geojson',data:{type:'Feature',geometry:g}});
+    map.addLayer({id:'route',type:'line',source:'route',
+      paint:{'line-color':'#ff0000','line-width':4}});
+  }
+}
+
+/* REMOVE & CLEAR */
+document.getElementById('btn-remove').onclick=()=>{
+  if(!waypoints.length)return;
+  waypoints.pop(); markers.pop().remove(); updateStops();
+};
+document.getElementById('clear').onclick=()=>{
+  waypoints=[]; markers.forEach(m=>m.remove()); markers=[];
+  document.getElementById('stops').innerHTML='';
+  document.getElementById('matrix').innerHTML='';
+};
+</script>
+
+</body>
+</html>
